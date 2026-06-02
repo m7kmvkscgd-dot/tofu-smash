@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>豆腐スマッシュ - カメラ版</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a0a00;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+    font-family: 'Georgia', serif;
+    touch-action: none;
+  }
+
+  #score-display {
+    color: #ff8c42;
+    font-size: 24px;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 12px;
+    letter-spacing: 4px;
+    text-shadow: 0 0 20px #ff8c4288;
+  }
+
+  #wrapper {
+    position: relative;
+    width: 300px;
+    height: 500px;
+  }
+
+  #canvas {
+    display: block;
+    border: 2px solid #ff8c4244;
+    border-radius: 4px;
+    background: #0d0500;
+    box-shadow: 0 0 40px #ff8c4222;
+  }
+
+  /* camera preview small */
+  #camPreview {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    width: 80px;
+    height: 60px;
+    border-radius: 4px;
+    border: 1px solid #ff8c4266;
+    object-fit: cover;
+    transform: scaleX(-1);
+    opacity: 0.7;
+  }
+
+  #controls {
+    margin-top: 16px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .btn {
+    background: #ff8c42;
+    color: #1a0a00;
+    border: none;
+    padding: 10px 20px;
+    font-size: 13px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+  }
+  .btn:active { transform: scale(0.95); }
+  .btn.secondary {
+    background: transparent;
+    border: 1px solid #ff8c4266;
+    color: #ff8c42;
+  }
+
+  #mode-label {
+    color: #ff8c4288;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-align: center;
+    margin-top: 8px;
+  }
+
+  #status {
+    color: #ff8c4266;
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-align: center;
+    margin-top: 4px;
+    min-height: 16px;
+  }
+</style>
+</head>
+<body>
+
+<div id="score-display">SMASH: <span id="score">0</span></div>
+<div id="wrapper">
+  <canvas id="canvas" width="300" height="500"></canvas>
+  <video id="camPreview" autoplay playsinline muted></video>
+</div>
+<div id="controls">
+  <button class="btn" id="startBtn">START</button>
+  <button class="btn secondary" id="camBtn">📷 カメラON</button>
+</div>
+<div id="mode-label" id="modeLabel">AUTO MODE</div>
+<div id="status">準備完了</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+const statusEl = document.getElementById('status');
+
+let score = 0;
+let running = false;
+let animId = null;
+let cameraMode = false;
+let fingerY = null; // normalized 0-1 from MediaPipe
+let mpCamera = null;
+
+// Rod
+const rod = {
+  x: W / 2,
+  y: 80,
+  w: 24,
+  h: 100,
+  direction: 1,
+  speed: 8,
+  prevY: 80,
+};
+
+// Tofu
+const tofu = {
+  x: W / 2 - 60,
+  y: H - 160,
+  w: 120,
+  h: 100,
+  hp: 100,
+  maxHp: 100,
+  cracks: [],
+  shakeX: 0,
+  shakeTimer: 0,
+  dead: false,
+};
+
+let particles = [];
+
+function resetTofu() {
+  tofu.hp = tofu.maxHp;
+  tofu.cracks = [];
+  tofu.shakeX = 0;
+  tofu.shakeTimer = 0;
+  tofu.dead = false;
+  particles = [];
+}
+
+function addCrack() {
+  tofu.cracks.push({
+    cx: tofu.x + Math.random() * tofu.w,
+    cy: tofu.y + Math.random() * tofu.h,
+    angle: Math.random() * Math.PI,
+    len: 10 + Math.random() * 30,
+  });
+}
+
+function spawnParticles(x, y, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x: x + (Math.random() - 0.5) * tofu.w,
+      y,
+      vx: (Math.random() - 0.5) * 5,
+      vy: -(Math.random() * 6 + 2),
+      size: Math.random() * 9 + 3,
+      alpha: 1,
+      color: `hsl(${40 + Math.random() * 20}, 80%, ${70 + Math.random() * 20}%)`,
+    });
+  }
+}
+
+// ---- MediaPipe setup ----
+function setupMediaPipe() {
+  const videoEl = document.getElementById('camPreview');
+
+  const hands = new Hands({
+    locateFile: (file) =>
+      `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 0,
+    minDetectionConfidence: 0.6,
+    minTrackingConfidence: 0.5,
+  });
+
+  hands.onResults((results) => {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      // index finger tip = landmark 8
+      const tip = results.multiHandLandmarks[0][8];
+      // tip.y is 0(top) to 1(bottom), map to canvas Y
+      fingerY = tip.y * H;
+      statusEl.textContent = '👆 指を検出中';
+    } else {
+      statusEl.textContent = '手を画面に向けてください';
+    }
+  });
+
+  mpCamera = new Camera(videoEl, {
+    onFrame: async () => {
+      await hands.send({ image: videoEl });
+    },
+    width: 320,
+    height: 240,
+  });
+
+  mpCamera.start().then(() => {
+    statusEl.textContent = 'カメラ起動完了 👆';
+  }).catch((e) => {
+    statusEl.textContent = 'カメラエラー: ' + e.message;
+    cameraMode = false;
+  });
+}
+
+// ---- Drawing ----
+function drawBackground() {
+  ctx.fillStyle = '#0d0500';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#ff8c4222';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, H - 40);
+  ctx.lineTo(W, H - 40);
+  ctx.stroke();
+}
+
+function drawRod() {
+  const rx = rod.x - rod.w / 2;
+  const ry = rod.y;
+
+  ctx.fillStyle = 'rgba(255,100,0,0.08)';
+  ctx.fillRect(rx + 4, ry + 4, rod.w, rod.h);
+
+  const grad = ctx.createLinearGradient(rx, 0, rx + rod.w, 0);
+  grad.addColorStop(0, '#c0712a');
+  grad.addColorStop(0.3, '#f0a060');
+  grad.addColorStop(0.7, '#e08040');
+  grad.addColorStop(1, '#a05020');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.roundRect(rx, ry, rod.w, rod.h, 6);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.beginPath();
+  ctx.roundRect(rx + 4, ry + 4, 6, rod.h - 8, 3);
+  ctx.fill();
+
+  // tip glow near tofu
+  if (rod.y + rod.h > tofu.y - 20) {
+    ctx.fillStyle = 'rgba(255,180,80,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(rod.x, ry + rod.h, rod.w / 2, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawTofu() {
+  if (tofu.dead) return;
+  const tx = tofu.x + tofu.shakeX;
+  const ty = tofu.y;
+
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  ctx.fillRect(tx + 5, ty + 5, tofu.w, tofu.h);
+
+  const damage = 1 - tofu.hp / tofu.maxHp;
+  const white = Math.floor(220 - damage * 60);
+  ctx.fillStyle = `rgb(${white},${white},${white - 10})`;
+  ctx.beginPath();
+  ctx.roundRect(tx, ty, tofu.w, tofu.h, 4);
+  ctx.fill();
+
+  // texture
+  ctx.strokeStyle = 'rgba(200,200,200,0.25)';
+  ctx.lineWidth = 0.5;
+  for (let i = 1; i < 4; i++) {
+    ctx.beginPath();
+    ctx.moveTo(tx + 8, ty + (tofu.h / 4) * i);
+    ctx.lineTo(tx + tofu.w - 8, ty + (tofu.h / 4) * i);
+    ctx.stroke();
+  }
+
+  // HP bar
+  const hpRatio = tofu.hp / tofu.maxHp;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(tx, ty - 12, tofu.w, 6);
+  ctx.fillStyle = hpRatio > 0.5 ? '#4ade80' : hpRatio > 0.25 ? '#facc15' : '#f87171';
+  ctx.fillRect(tx, ty - 12, tofu.w * hpRatio, 6);
+
+  // cracks
+  tofu.cracks.forEach(c => {
+    ctx.save();
+    ctx.translate(c.cx + tofu.shakeX, c.cy);
+    ctx.rotate(c.angle);
+    ctx.strokeStyle = 'rgba(100,80,60,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-c.len / 2, 0);
+    ctx.lineTo(c.len / 2, 0);
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.roundRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size, 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+}
+
+function drawFingerIndicator() {
+  if (!cameraMode || fingerY === null) return;
+  ctx.strokeStyle = 'rgba(255,140,66,0.4)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(0, fingerY);
+  ctx.lineTo(W, fingerY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+// ---- Update ----
+function update() {
+  rod.prevY = rod.y;
+
+  if (cameraMode && fingerY !== null) {
+    // finger controls rod tip position (clamp so rod stays in canvas)
+    const targetY = Math.min(Math.max(fingerY - rod.h, 10), H - rod.h - 20);
+    rod.y += (targetY - rod.y) * 0.25; // smooth follow
+  } else {
+    // auto piston
+    rod.y += rod.speed * rod.direction;
+    if (rod.y <= 20) { rod.direction = 1; rod.y = 20; }
+  }
+
+  const rodBottom = rod.y + rod.h;
+  const wasAbove = rod.prevY + rod.h <= tofu.y;
+  const isBelow = rodBottom >= tofu.y;
+
+  // Collision: rod tip crossing tofu top surface moving downward
+  if (!tofu.dead && isBelow && (wasAbove || cameraMode) && rod.y < tofu.y + tofu.h) {
+    if (cameraMode) {
+      // in camera mode, detect crossing direction by velocity
+      const vel = rod.y - rod.prevY;
+      if (vel > 0.5) {
+        hitTofu();
+        rod.y = tofu.y - rod.h; // prevent sinking
+      }
+    } else {
+      hitTofu();
+      rod.direction = -1;
+      rod.y = tofu.y - rod.h;
+    }
+  }
+
+  // auto mode top bounce
+  if (!cameraMode && rod.y <= 20) {
+    rod.direction = 1;
+  }
+
+  // shake decay
+  if (tofu.shakeTimer > 0) {
+    tofu.shakeTimer--;
+    tofu.shakeX = tofu.shakeTimer > 0 ? (Math.random() - 0.5) * 6 : 0;
+  }
+
+  // particles
+  particles = particles.filter(p => p.alpha > 0.05);
+  particles.forEach(p => {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.2;
+    p.alpha -= 0.03; p.size *= 0.97;
+  });
+}
+
+function hitTofu() {
+  const dmg = cameraMode ? 8 : 6;
+  tofu.hp = Math.max(0, tofu.hp - dmg);
+  score += dmg;
+  document.getElementById('score').textContent = score;
+  tofu.shakeX = 6;
+  tofu.shakeTimer = 8;
+  addCrack();
+  if (tofu.hp < tofu.maxHp * 0.5) addCrack();
+  spawnParticles(tofu.x + tofu.w / 2, tofu.y, 5);
+
+  if (tofu.hp <= 0) {
+    tofu.dead = true;
+    spawnParticles(tofu.x + tofu.w / 2, tofu.y + tofu.h / 2, 24);
+    setTimeout(resetTofu, 800);
+  }
+}
+
+function loop() {
+  if (!running) return;
+  drawBackground();
+  update();
+  drawFingerIndicator();
+  drawTofu();
+  drawParticles();
+  drawRod();
+  animId = requestAnimationFrame(loop);
+}
+
+// ---- Controls ----
+document.getElementById('startBtn').addEventListener('click', () => {
+  if (running) {
+    running = false;
+    cancelAnimationFrame(animId);
+    document.getElementById('startBtn').textContent = 'START';
+    drawBackground();
+    resetTofu();
+    score = 0;
+    document.getElementById('score').textContent = 0;
+    rod.y = 80; rod.direction = 1;
+    statusEl.textContent = '停止';
+  } else {
+    running = true;
+    document.getElementById('startBtn').textContent = 'STOP';
+    statusEl.textContent = cameraMode ? '指で操作中' : 'AUTO MODE';
+    loop();
+  }
+});
+
+document.getElementById('camBtn').addEventListener('click', () => {
+  if (cameraMode) {
+    cameraMode = false;
+    fingerY = null;
+    if (mpCamera) mpCamera.stop();
+    document.getElementById('camBtn').textContent = '📷 カメラON';
+    document.getElementById('camPreview').style.opacity = '0';
+    statusEl.textContent = 'AUTO MODEに切替';
+    document.getElementById('mode-label').textContent = 'AUTO MODE';
+  } else {
+    cameraMode = true;
+    document.getElementById('camBtn').textContent = '📷 カメラOFF';
+    document.getElementById('camPreview').style.opacity = '0.7';
+    statusEl.textContent = 'カメラ起動中...';
+    document.getElementById('mode-label').textContent = 'CAMERA MODE — 人差し指で操作';
+    setupMediaPipe();
+  }
+});
+</script>
+</body>
+</html>
