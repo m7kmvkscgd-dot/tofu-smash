@@ -10,308 +10,411 @@ body {
   background:#1a0a00;
   display:flex; flex-direction:column;
   align-items:center; justify-content:center;
-  min-height:100vh; overflow:hidden;
-  font-family:Georgia,serif; touch-action:none;
+  min-height:100vh; font-family:Georgia,serif;
+  touch-action:none; overflow:hidden;
 }
-#score-display {
-  color:#ff8c42; font-size:24px; font-weight:bold;
-  letter-spacing:4px; margin-bottom:12px;
+#scoreEl {
+  color:#ff8c42; font-size:26px; font-weight:bold;
+  letter-spacing:4px; margin-bottom:10px;
   text-shadow:0 0 20px #ff8c4288;
 }
-#wrapper { position:relative; width:300px; height:500px; }
+#wrap { position:relative; width:300px; height:500px; }
 #canvas {
-  display:block; border:2px solid #ff8c4244;
-  border-radius:4px; background:#0d0500;
-  box-shadow:0 0 40px #ff8c4222;
+  display:block; width:300px; height:500px;
+  border:2px solid #ff8c4244; border-radius:4px;
+  background:#0d0500; box-shadow:0 0 40px #ff8c4222;
 }
-#camPreview {
-  position:absolute; bottom:8px; right:8px;
-  width:90px; height:70px; border-radius:4px;
-  border:1px solid #ff8c4266; object-fit:cover;
-  opacity:0; transition:opacity 0.3s;
+#vid {
+  position:absolute; bottom:6px; right:6px;
+  width:90px; height:68px; object-fit:cover;
+  border-radius:4px; border:1px solid #ff8c4266;
+  opacity:0; transition:opacity .3s;
+  transform:scaleX(-1); /* アウトカメラなので反転なし後で対応 */
 }
-#overlay {
-  position:absolute; top:0; left:0;
-  width:90px; height:70px;
-  bottom:8px; right:8px;
-  pointer-events:none;
-}
-#controls {
-  margin-top:16px; display:flex;
-  gap:12px; flex-wrap:wrap; justify-content:center;
-}
+#btns { margin-top:14px; display:flex; gap:10px; }
 .btn {
-  background:#ff8c42; color:#1a0a00;
-  border:none; padding:10px 20px;
-  font-size:13px; font-weight:bold;
-  letter-spacing:2px; cursor:pointer; border-radius:2px;
+  padding:10px 22px; font-size:13px; font-weight:bold;
+  letter-spacing:2px; cursor:pointer; border-radius:2px; border:none;
 }
-.btn.off {
-  background:transparent;
-  border:1px solid #ff8c4266; color:#ff8c42;
-}
-#info { color:#ff8c4266; font-size:11px; margin-top:8px; text-align:center; }
-#status { color:#ff8c4244; font-size:10px; margin-top:4px; text-align:center; }
+#btnStart { background:#ff8c42; color:#1a0a00; }
+#btnCam { background:transparent; border:1px solid #ff8c4255; color:#ff8c42; }
+#statusEl { color:#ff8c4266; font-size:11px; margin-top:6px; letter-spacing:1px; }
 </style>
 </head>
 <body>
-<div id="score-display">SMASH: <span id="score">0</span></div>
-<div id="wrapper">
-  <canvas id="canvas" width="300" height="500"></canvas>
-  <video id="camPreview" autoplay playsinline muted></video>
-</div>
-<div id="controls">
-  <button class="btn" id="startBtn">START</button>
-  <button class="btn off" id="camBtn">📷 カメラON</button>
-</div>
-<div id="info">AUTO MODE</div>
-<div id="status">準備完了</div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.2.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.0/dist/hand-pose-detection.min.js"></script>
+<div id="scoreEl">SMASH: <span id="scoreNum">0</span></div>
+<div id="wrap">
+  <canvas id="canvas" width="300" height="500"></canvas>
+  <video id="vid" autoplay playsinline muted></video>
+</div>
+<div id="btns">
+  <button class="btn" id="btnStart">START</button>
+  <button class="btn" id="btnCam">📷 カメラON</button>
+</div>
+<div id="statusEl">AUTO MODE</div>
 
 <script>
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
+// ─── 定数 ───────────────────────────────
 const W = 300, H = 500;
-const statusEl = document.getElementById('status');
-const infoEl = document.getElementById('info');
 
-let score = 0, running = false, animId = null;
-let cameraMode = false, fingerY = null;
-let detector = null, detecting = false;
-let videoStream = null;
+// ─── 要素 ───────────────────────────────
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+const vid    = document.getElementById('vid');
+const statusEl = document.getElementById('statusEl');
+const scoreNumEl = document.getElementById('scoreNum');
 
-const rod = { x:150, y:80, w:24, h:100, dir:1, speed:8, prevY:80 };
-const tofu = { x:90, y:340, w:120, h:100, hp:100, maxHp:100, cracks:[], shakeX:0, shakeTimer:0, dead:false };
-let particles = [];
+// ─── 状態 ───────────────────────────────
+let running    = false;
+let camOn      = false;
+let fingerY    = null;   // canvas座標系でのY
+let score      = 0;
+let animId     = null;
 
-function resetTofu() {
-  Object.assign(tofu, { hp:100, cracks:[], shakeX:0, shakeTimer:0, dead:false });
-  particles = [];
+// ─── ロッド ─────────────────────────────
+const rod = {
+  x: 150, y: 60, w: 22, h: 110,
+  dir: 1, speed: 7, prevY: 60
+};
+
+// ─── 豆腐 ───────────────────────────────
+let tofu = newTofu();
+function newTofu() {
+  return { x:90, y:330, w:120, h:110, hp:100, cracks:[], shakeX:0, shakeT:0, dead:false };
 }
+
+// ─── パーティクル ─────────────────────────
+let parts = [];
 
 function addCrack() {
-  tofu.cracks.push({
-    cx: tofu.x + Math.random()*tofu.w,
-    cy: tofu.y + Math.random()*tofu.h,
-    angle: Math.random()*Math.PI,
-    len: 10 + Math.random()*30
+  const t = tofu;
+  t.cracks.push({
+    cx: t.x + 10 + Math.random()*(t.w-20),
+    cy: t.y + 10 + Math.random()*(t.h-20),
+    ang: Math.random()*Math.PI,
+    len: 12 + Math.random()*28
   });
 }
 
-function spawnParticles(x, y, n) {
-  for (let i=0; i<n; i++) particles.push({
-    x: x+(Math.random()-.5)*tofu.w, y,
-    vx:(Math.random()-.5)*5, vy:-(Math.random()*6+2),
-    size:Math.random()*8+3, alpha:1,
-    color:`hsl(${40+Math.random()*20},80%,${70+Math.random()*20}%)`
-  });
-}
-
-function hitTofu() {
-  tofu.hp = Math.max(0, tofu.hp - 7);
-  score += 7;
-  document.getElementById('score').textContent = score;
-  tofu.shakeX = 6; tofu.shakeTimer = 8;
-  addCrack();
-  if (tofu.hp < 50) addCrack();
-  spawnParticles(tofu.x+tofu.w/2, tofu.y, 5);
-  if (tofu.hp <= 0) {
-    tofu.dead = true;
-    spawnParticles(tofu.x+tofu.w/2, tofu.y+tofu.h/2, 20);
-    setTimeout(resetTofu, 800);
-  }
-}
-
-function draw() {
-  // BG
-  ctx.fillStyle='#0d0500'; ctx.fillRect(0,0,W,H);
-  ctx.strokeStyle='#ff8c4222'; ctx.lineWidth=1;
-  ctx.beginPath(); ctx.moveTo(0,H-40); ctx.lineTo(W,H-40); ctx.stroke();
-
-  // finger line
-  if (cameraMode && fingerY !== null) {
-    ctx.strokeStyle='rgba(255,140,66,0.4)';
-    ctx.setLineDash([4,4]);
-    ctx.beginPath(); ctx.moveTo(0,fingerY); ctx.lineTo(W,fingerY); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // tofu
-  if (!tofu.dead) {
-    const tx = tofu.x+tofu.shakeX;
-    const dmg = 1 - tofu.hp/tofu.maxHp;
-    const w = Math.floor(220 - dmg*60);
-    ctx.fillStyle=`rgb(${w},${w},${w-10})`;
-    ctx.beginPath(); ctx.roundRect(tx,tofu.y,tofu.w,tofu.h,4); ctx.fill();
-    ctx.strokeStyle='rgba(200,200,200,0.2)'; ctx.lineWidth=0.5;
-    for(let i=1;i<4;i++){
-      ctx.beginPath(); ctx.moveTo(tx+8,tofu.y+(tofu.h/4)*i); ctx.lineTo(tx+tofu.w-8,tofu.y+(tofu.h/4)*i); ctx.stroke();
-    }
-    const hp = tofu.hp/tofu.maxHp;
-    ctx.fillStyle='#222'; ctx.fillRect(tx,tofu.y-12,tofu.w,6);
-    ctx.fillStyle = hp>.5?'#4ade80':hp>.25?'#facc15':'#f87171';
-    ctx.fillRect(tx,tofu.y-12,tofu.w*hp,6);
-    tofu.cracks.forEach(c=>{
-      ctx.save(); ctx.translate(c.cx+tofu.shakeX,c.cy); ctx.rotate(c.angle);
-      ctx.strokeStyle='rgba(100,80,60,0.8)'; ctx.lineWidth=1.5;
-      ctx.beginPath(); ctx.moveTo(-c.len/2,0); ctx.lineTo(c.len/2,0); ctx.stroke();
-      ctx.restore();
+function spawnParts(x, y, n) {
+  for (let i=0; i<n; i++) {
+    parts.push({
+      x: x + (Math.random()-.5)*60,
+      y: y,
+      vx: (Math.random()-.5)*6,
+      vy: -(Math.random()*7+2),
+      sz: Math.random()*10+3,
+      a: 1,
+      col: `hsl(${38+Math.random()*18},85%,${68+Math.random()*20}%)`
     });
   }
+}
 
-  // particles
-  particles.forEach(p=>{
-    ctx.globalAlpha=p.alpha; ctx.fillStyle=p.color;
-    ctx.beginPath(); ctx.roundRect(p.x-p.size/2,p.y-p.size/2,p.size,p.size,2); ctx.fill();
-  });
-  ctx.globalAlpha=1;
+function onHit() {
+  if (tofu.dead) return;
+  tofu.hp -= 8;
+  score   += 8;
+  scoreNumEl.textContent = score;
+  tofu.shakeX = 8;
+  tofu.shakeT = 10;
+  addCrack();
+  if (tofu.hp < 50) addCrack();
+  spawnParts(tofu.x + tofu.w/2, tofu.y + 10, 5);
 
-  // rod
-  const rx = rod.x-rod.w/2;
-  const gr = ctx.createLinearGradient(rx,0,rx+rod.w,0);
-  gr.addColorStop(0,'#c0712a'); gr.addColorStop(.3,'#f0a060');
-  gr.addColorStop(.7,'#e08040'); gr.addColorStop(1,'#a05020');
-  ctx.fillStyle=gr;
-  ctx.beginPath(); ctx.roundRect(rx,rod.y,rod.w,rod.h,6); ctx.fill();
-  ctx.fillStyle='rgba(255,255,255,0.2)';
-  ctx.beginPath(); ctx.roundRect(rx+4,rod.y+4,6,rod.h-8,3); ctx.fill();
-  if (rod.y+rod.h > tofu.y-20) {
-    ctx.fillStyle='rgba(255,180,80,0.3)';
-    ctx.beginPath(); ctx.ellipse(rod.x,rod.y+rod.h,rod.w/2,8,0,0,Math.PI*2); ctx.fill();
+  if (tofu.hp <= 0) {
+    tofu.dead = true;
+    spawnParts(tofu.x + tofu.w/2, tofu.y + tofu.h/2, 22);
+    setTimeout(() => { tofu = newTofu(); }, 900);
   }
 }
 
+// ─── 更新 ────────────────────────────────
 function update() {
   rod.prevY = rod.y;
 
-  if (cameraMode && fingerY !== null) {
-    const ty = Math.min(Math.max(fingerY-rod.h, 10), H-rod.h-20);
-    rod.y += (ty-rod.y)*0.3;
+  if (camOn && fingerY !== null) {
+    // 指のY座標にロッド先端を追従
+    const target = Math.max(10, Math.min(H - rod.h - 10, fingerY - rod.h));
+    rod.y += (target - rod.y) * 0.35;
   } else {
+    // オートピストン
     rod.y += rod.speed * rod.dir;
-    if (rod.y <= 20) { rod.dir=1; rod.y=20; }
+    if (rod.y <= 10)           { rod.dir =  1; rod.y = 10; }
+    if (rod.y >= H - rod.h - 10) { rod.dir = -1; }
   }
 
-  const rb = rod.y+rod.h;
-  const wasAbove = rod.prevY+rod.h <= tofu.y;
+  // 当たり判定
+  const bottom  = rod.y + rod.h;
+  const wasAbove = rod.prevY + rod.h <= tofu.y;
+  const hitting  = bottom >= tofu.y && rod.y < tofu.y + tofu.h;
 
-  if (!tofu.dead && rb >= tofu.y && rod.y < tofu.y+tofu.h) {
-    if (cameraMode) {
-      if (wasAbove && rod.y-rod.prevY > 0.5) { hitTofu(); rod.y=tofu.y-rod.h; }
-    } else if (wasAbove) {
-      hitTofu(); rod.dir=-1; rod.y=tofu.y-rod.h;
+  if (!tofu.dead && hitting) {
+    if (camOn) {
+      // カメラモード: 下向きに動いて豆腐に触れたとき
+      if (wasAbove && (rod.y - rod.prevY) > 0.3) {
+        onHit();
+        rod.y = tofu.y - rod.h;
+      }
+    } else {
+      // オートモード: 上から突き刺さったとき
+      if (wasAbove) {
+        onHit();
+        rod.dir = -1;
+        rod.y   = tofu.y - rod.h;
+      }
     }
   }
 
-  if (tofu.shakeTimer>0) {
-    tofu.shakeTimer--;
-    tofu.shakeX = tofu.shakeTimer>0 ? (Math.random()-.5)*6 : 0;
+  // 豆腐シェイク
+  if (tofu.shakeT > 0) {
+    tofu.shakeT--;
+    tofu.shakeX = tofu.shakeT > 0 ? (Math.random()-.5)*8 : 0;
   }
 
-  particles = particles.filter(p=>p.alpha>0.05);
-  particles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.vy+=0.2; p.alpha-=0.03; p.size*=0.97; });
+  // パーティクル
+  parts = parts.filter(p => p.a > 0.04);
+  for (const p of parts) {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.22;
+    p.a  -= 0.028; p.sz *= 0.97;
+  }
+}
+
+// ─── 描画 ────────────────────────────────
+function drawBg() {
+  ctx.fillStyle = '#0d0500';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#ff8c4218';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,H-30); ctx.lineTo(W,H-30); ctx.stroke();
+}
+
+function drawTofu() {
+  if (tofu.dead) return;
+  const tx = tofu.x + tofu.shakeX;
+  const ty = tofu.y;
+
+  // 影
+  ctx.fillStyle = 'rgba(255,255,255,0.03)';
+  ctx.fillRect(tx+5, ty+5, tofu.w, tofu.h);
+
+  // 本体
+  const d = 1 - tofu.hp/100;
+  const v = Math.floor(218 - d*60);
+  ctx.fillStyle = `rgb(${v},${v},${v-8})`;
+  ctx.beginPath(); ctx.roundRect(tx, ty, tofu.w, tofu.h, 5); ctx.fill();
+
+  // テクスチャ
+  ctx.strokeStyle = 'rgba(190,190,190,0.2)';
+  ctx.lineWidth = 0.5;
+  for (let i=1; i<4; i++) {
+    ctx.beginPath();
+    ctx.moveTo(tx+10, ty+(tofu.h/4)*i);
+    ctx.lineTo(tx+tofu.w-10, ty+(tofu.h/4)*i);
+    ctx.stroke();
+  }
+
+  // HPバー
+  const r = tofu.hp/100;
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(tx, ty-14, tofu.w, 7);
+  ctx.fillStyle = r > .5 ? '#4ade80' : r > .25 ? '#facc15' : '#f87171';
+  ctx.fillRect(tx, ty-14, tofu.w*r, 7);
+
+  // ひび
+  for (const c of tofu.cracks) {
+    ctx.save();
+    ctx.translate(c.cx + tofu.shakeX, c.cy);
+    ctx.rotate(c.ang);
+    ctx.strokeStyle = 'rgba(90,70,50,0.75)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(-c.len/2, 0); ctx.lineTo(c.len/2, 0); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawRod() {
+  const rx = rod.x - rod.w/2;
+  const gr = ctx.createLinearGradient(rx, 0, rx+rod.w, 0);
+  gr.addColorStop(0,   '#b8611f');
+  gr.addColorStop(0.3, '#f09848');
+  gr.addColorStop(0.7, '#d87830');
+  gr.addColorStop(1,   '#9a4818');
+  ctx.fillStyle = gr;
+  ctx.beginPath(); ctx.roundRect(rx, rod.y, rod.w, rod.h, 7); ctx.fill();
+
+  // ハイライト
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  ctx.beginPath(); ctx.roundRect(rx+4, rod.y+5, 6, rod.h-10, 3); ctx.fill();
+
+  // 先端グロー
+  if (rod.y + rod.h > tofu.y - 25) {
+    ctx.fillStyle = 'rgba(255,170,70,0.32)';
+    ctx.beginPath();
+    ctx.ellipse(rod.x, rod.y+rod.h, rod.w/2+2, 9, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+}
+
+function drawParts() {
+  for (const p of parts) {
+    ctx.globalAlpha = p.a;
+    ctx.fillStyle   = p.col;
+    ctx.beginPath();
+    ctx.roundRect(p.x-p.sz/2, p.y-p.sz/2, p.sz, p.sz, 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawFingerLine() {
+  if (!camOn || fingerY === null) return;
+  ctx.strokeStyle = 'rgba(255,140,66,0.45)';
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath(); ctx.moveTo(0, fingerY); ctx.lineTo(W, fingerY); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function render() {
+  drawBg();
+  drawFingerLine();
+  drawTofu();
+  drawParts();
+  drawRod();
 }
 
 function loop() {
   if (!running) return;
-  update(); draw();
+  update();
+  render();
   animId = requestAnimationFrame(loop);
 }
 
-// カメラ + TF.js hand detection
-async function startCamera() {
-  try {
-    statusEl.textContent = 'カメラ起動中...';
-    const video = document.getElementById('camPreview');
+// ─── カメラ + 指検出（色ベース） ───────────
+let offscreen = null, offCtx = null;
+let camStream = null;
+let camLoopId = null;
 
+async function startCam() {
+  statusEl.textContent = 'カメラ起動中...';
+  try {
     // アウトカメラ優先
     try {
-      videoStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode:{exact:'environment'}, width:320, height:240 }
+      camStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: 'environment' }, width:320, height:240 }
       });
-    } catch(e) {
-      videoStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode:'user', width:320, height:240 }
+      vid.style.transform = 'scaleX(1)'; // アウトカメラは反転不要
+    } catch {
+      camStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width:320, height:240 }
       });
+      vid.style.transform = 'scaleX(-1)';
     }
-    video.srcObject = videoStream;
-    await video.play();
-    video.style.opacity = '0.8';
-    statusEl.textContent = 'モデル読込中...';
+    vid.srcObject = camStream;
+    await vid.play();
+    vid.style.opacity = '0.85';
 
-    // TF.js detector
-    detector = await handPoseDetection.createDetector(
-      handPoseDetection.SupportedModels.MediaPipeHands,
-      { runtime:'tfjs', modelType:'lite', maxHands:1 }
-    );
+    offscreen = document.createElement('canvas');
+    offscreen.width  = 80;
+    offscreen.height = 60;
+    offCtx = offscreen.getContext('2d', { willReadFrequently: true });
 
-    statusEl.textContent = '👆 指をカメラに向けて';
-    detectLoop(video);
+    statusEl.textContent = '🖐 指をカメラに';
+    camDetectLoop();
+
   } catch(e) {
-    statusEl.textContent = 'エラー: ' + e.message;
-    cameraMode = false;
+    statusEl.textContent = 'カメラエラー: ' + e.message;
+    camOn = false;
+    document.getElementById('btnCam').textContent = '📷 カメラON';
   }
 }
 
-let lastDetect = 0;
-async function detectLoop(video) {
-  if (!cameraMode) return;
-  const now = Date.now();
-  if (now - lastDetect > 80) { // 約12fps
-    lastDetect = now;
-    try {
-      const hands = await detector.estimateHands(video);
-      if (hands.length > 0) {
-        const kp = hands[0].keypoints;
-        const tip = kp[8]; // 人差し指先端
-        fingerY = (tip.y / 240) * H;
-        statusEl.textContent = '👆 検出中';
-      } else {
-        statusEl.textContent = '指をカメラに向けて';
-      }
-    } catch(e) {}
-  }
-  requestAnimationFrame(() => detectLoop(video));
-}
-
-function stopCamera() {
-  if (videoStream) { videoStream.getTracks().forEach(t=>t.stop()); videoStream=null; }
-  document.getElementById('camPreview').style.opacity='0';
+function stopCam() {
+  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  vid.style.opacity = '0';
   fingerY = null;
-  statusEl.textContent = '停止';
+  if (camLoopId) cancelAnimationFrame(camLoopId);
 }
 
-document.getElementById('startBtn').addEventListener('click', () => {
-  if (running) {
-    running=false; cancelAnimationFrame(animId);
-    document.getElementById('startBtn').textContent='START';
-    score=0; document.getElementById('score').textContent=0;
-    rod.y=80; rod.dir=1; resetTofu(); draw();
+// 肌色検出で指先Y座標を求める
+let lastCamTime = 0;
+function camDetectLoop() {
+  if (!camOn) return;
+  camLoopId = requestAnimationFrame(camDetectLoop);
+
+  const now = performance.now();
+  if (now - lastCamTime < 80) return; // 約12fps
+  lastCamTime = now;
+
+  if (vid.readyState < 2) return;
+
+  offCtx.drawImage(vid, 0, 0, 80, 60);
+  const data = offCtx.getImageData(0, 0, 80, 60).data;
+
+  // 肌色に近いピクセルの最小Y（最上端）を指先とする
+  let minY = -1;
+  for (let y = 0; y < 60; y++) {
+    for (let x = 0; x < 80; x++) {
+      const i = (y*80+x)*4;
+      const r = data[i], g = data[i+1], b = data[i+2];
+      if (isSkin(r,g,b)) {
+        if (minY < 0) minY = y;
+        break;
+      }
+    }
+    if (minY >= 0) break;
+  }
+
+  if (minY >= 0) {
+    // offscreenの座標(0-60) → canvas座標(0-500)
+    fingerY = (minY / 60) * H;
+    statusEl.textContent = '👆 検出中';
   } else {
-    running=true;
-    document.getElementById('startBtn').textContent='STOP';
+    statusEl.textContent = '🖐 指をカメラに向けて';
+  }
+}
+
+function isSkin(r, g, b) {
+  // YCbCr色空間で肌色判定
+  const Y  =  0.299*r + 0.587*g + 0.114*b;
+  const Cb = -0.169*r - 0.331*g + 0.500*b + 128;
+  const Cr =  0.500*r - 0.419*g - 0.081*b + 128;
+  return Y > 80 && Cb >= 77 && Cb <= 127 && Cr >= 133 && Cr <= 173;
+}
+
+// ─── ボタン ──────────────────────────────
+document.getElementById('btnStart').addEventListener('click', () => {
+  if (running) {
+    running = false;
+    cancelAnimationFrame(animId);
+    document.getElementById('btnStart').textContent = 'START';
+    score = 0; scoreNumEl.textContent = 0;
+    rod.y = 60; rod.dir = 1;
+    tofu = newTofu();
+    parts = [];
+    render();
+  } else {
+    running = true;
+    document.getElementById('btnStart').textContent = 'STOP';
     loop();
   }
 });
 
-document.getElementById('camBtn').addEventListener('click', () => {
-  cameraMode = !cameraMode;
-  if (cameraMode) {
-    document.getElementById('camBtn').textContent='📷 カメラOFF';
-    document.getElementById('camBtn').classList.remove('off');
-    infoEl.textContent='CAMERA MODE — 人差し指で操作';
-    startCamera();
+document.getElementById('btnCam').addEventListener('click', () => {
+  camOn = !camOn;
+  if (camOn) {
+    document.getElementById('btnCam').textContent = '📷 カメラOFF';
+    startCam();
   } else {
-    document.getElementById('camBtn').textContent='📷 カメラON';
-    document.getElementById('camBtn').classList.add('off');
-    infoEl.textContent='AUTO MODE';
-    stopCamera();
+    document.getElementById('btnCam').textContent = '📷 カメラON';
+    stopCam();
+    statusEl.textContent = 'AUTO MODE';
   }
 });
 
-draw();
+// ─── 初期描画 ────────────────────────────
+render();
 </script>
 </body>
 </html>
