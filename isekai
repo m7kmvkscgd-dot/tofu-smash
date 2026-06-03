@@ -1,0 +1,463 @@
+import { useState, useEffect, useRef } from "react";
+
+const SYSTEM_PROMPT = `あなたは異世界ファンタジーRPGのゲームマスターです。
+プレイヤーは異世界に召喚された勇者です。
+
+ルール：
+- 毎回の返答は必ずJSON形式のみで返してください（マークダウンや説明文は一切不要）
+- 以下のJSON構造を厳守してください：
+{
+  "narrative": "物語の描写（200字以内、臨場感ある文章）",
+  "situation": "現在の状況の簡潔な説明（50字以内）",
+  "choices": ["選択肢1", "選択肢2", "選択肢3"],
+  "hpChange": 0,
+  "mpChange": 0,
+  "goldChange": 0,
+  "itemGained": null,
+  "battleResult": null
+}
+
+- choices は必ず3つ提供する
+- hpChange/mpChange/goldChange は整数（マイナス可）
+- itemGained は入手したアイテム名（なければnull）
+- battleResult は "victory"/"defeat"/null
+- 戦闘、謎解き、NPC交流、宝探しなど多彩なイベントを用意する
+- プレイヤーのHPが0になったらgame overの描写をする
+- 世界観：魔法と剣の中世ファンタジー。竜、魔王、エルフ、ドワーフが存在する`;
+
+const INITIAL_STATE = {
+  hp: 100, maxHp: 100,
+  mp: 50, maxMp: 50,
+  gold: 10,
+  level: 1,
+  xp: 0,
+  items: ["回復薬×1"],
+  playerName: "",
+  gameStarted: false,
+  gameOver: false,
+  log: [],
+  narrative: "",
+  situation: "冒険の始まり",
+  choices: [],
+  loading: false,
+  history: [],
+};
+
+const CLASSES = ["⚔️ 勇者", "🔮 魔法使い", "🗡️ 盗賊", "🛡️ 騎士"];
+
+export default function IsekaiRPG() {
+  const [state, setState] = useState(INITIAL_STATE);
+  const [nameInput, setNameInput] = useState("");
+  const [selectedClass, setSelectedClass] = useState(CLASSES[0]);
+  const logRef = useRef(null);
+
+  useEffect(() => {
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [state.log]);
+
+  async function startGame() {
+    if (!nameInput.trim()) return;
+    setState(s => ({ ...s, loading: true, playerName: nameInput, gameStarted: true }));
+    await callAI(`ゲーム開始。プレイヤー名：${nameInput}、職業：${selectedClass}。異世界に召喚されたオープニングシーンから始めてください。`, [], nameInput, selectedClass);
+  }
+
+  async function makeChoice(choice) {
+    if (state.loading || state.gameOver) return;
+    const newHistory = [...state.history, 
+      { role: "assistant", content: JSON.stringify({ narrative: state.narrative, situation: state.situation, choices: state.choices }) },
+      { role: "user", content: `プレイヤーの選択：「${choice}」` }
+    ];
+    setState(s => ({ ...s, loading: true, history: newHistory }));
+    await callAI(`プレイヤーの選択：「${choice}」`, newHistory, state.playerName, selectedClass);
+  }
+
+  async function callAI(userMessage, history, playerName, playerClass) {
+    try {
+      const messages = history.length > 0
+        ? [...history]
+        : [{ role: "user", content: userMessage }];
+      
+      if (history.length === 0) {
+        messages[0].content = userMessage;
+      }
+
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: SYSTEM_PROMPT + `\nプレイヤー情報：名前=${playerName}、職業=${playerClass}`,
+          messages: messages.length > 0 ? messages : [{ role: "user", content: userMessage }],
+        })
+      });
+      const data = await response.json();
+      const text = data.content?.map(i => i.text || "").join("") || "{}";
+      
+      let parsed;
+      try {
+        const clean = text.replace(/```json|```/g, "").trim();
+        parsed = JSON.parse(clean);
+      } catch {
+        parsed = {
+          narrative: "冒険は続く…（エラーが発生しました）",
+          situation: "不明",
+          choices: ["前に進む", "周囲を探索する", "休息する"],
+          hpChange: 0, mpChange: 0, goldChange: 0,
+          itemGained: null, battleResult: null
+        };
+      }
+
+      setState(s => {
+        const newHp = Math.min(s.maxHp, Math.max(0, s.hp + (parsed.hpChange || 0)));
+        const newMp = Math.min(s.maxMp, Math.max(0, s.mp + (parsed.mpChange || 0)));
+        const newGold = Math.max(0, s.gold + (parsed.goldChange || 0));
+        const newItems = parsed.itemGained ? [...s.items, parsed.itemGained] : s.items;
+        const isGameOver = newHp <= 0;
+        
+        const logEntry = {
+          narrative: parsed.narrative,
+          hpChange: parsed.hpChange,
+          mpChange: parsed.mpChange,
+          goldChange: parsed.goldChange,
+          itemGained: parsed.itemGained,
+          battleResult: parsed.battleResult,
+        };
+
+        return {
+          ...s,
+          hp: newHp, mp: newMp, gold: newGold,
+          items: newItems,
+          narrative: parsed.narrative || "",
+          situation: parsed.situation || "",
+          choices: isGameOver ? [] : (parsed.choices || []),
+          log: [...s.log, logEntry],
+          loading: false,
+          gameOver: isGameOver,
+          history: [
+            ...s.history,
+            { role: "assistant", content: text }
+          ],
+        };
+      });
+    } catch (err) {
+      setState(s => ({ ...s, loading: false }));
+    }
+  }
+
+  function resetGame() {
+    setState(INITIAL_STATE);
+    setNameInput("");
+  }
+
+  const hpPercent = (state.hp / state.maxHp) * 100;
+  const mpPercent = (state.mp / state.maxMp) * 100;
+
+  if (!state.gameStarted) {
+    return (
+      <div style={styles.root}>
+        <div style={styles.titleScreen}>
+          <div style={styles.titleGlow}>⚔️</div>
+          <h1 style={styles.title}>異世界転生RPG</h1>
+          <p style={styles.subtitle}>〜 勇者よ、世界を救え 〜</p>
+          <div style={styles.setupCard}>
+            <label style={styles.label}>勇者の名前</label>
+            <input
+              style={styles.input}
+              value={nameInput}
+              onChange={e => setNameInput(e.target.value)}
+              placeholder="名前を入力..."
+              onKeyDown={e => e.key === "Enter" && startGame()}
+              maxLength={20}
+            />
+            <label style={styles.label}>職業を選択</label>
+            <div style={styles.classGrid}>
+              {CLASSES.map(c => (
+                <button
+                  key={c}
+                  style={{ ...styles.classBtn, ...(selectedClass === c ? styles.classBtnActive : {}) }}
+                  onClick={() => setSelectedClass(c)}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            <button
+              style={{ ...styles.startBtn, ...(nameInput.trim() ? {} : styles.startBtnDisabled) }}
+              onClick={startGame}
+              disabled={!nameInput.trim()}
+            >
+              冒険を始める
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.root}>
+      <div style={styles.gameLayout}>
+        {/* サイドバー：ステータス */}
+        <div style={styles.sidebar}>
+          <div style={styles.statusCard}>
+            <div style={styles.playerHeader}>
+              <span style={styles.playerAvatar}>🧙</span>
+              <div>
+                <div style={styles.playerName}>{state.playerName}</div>
+                <div style={styles.playerClass}>{selectedClass} Lv.{state.level}</div>
+              </div>
+            </div>
+            
+            <div style={styles.statRow}>
+              <span style={styles.statLabel}>HP</span>
+              <div style={styles.barBg}>
+                <div style={{ ...styles.barFill, width: `${hpPercent}%`, background: hpPercent > 50 ? "#4ade80" : hpPercent > 25 ? "#facc15" : "#f87171" }} />
+              </div>
+              <span style={styles.statVal}>{state.hp}/{state.maxHp}</span>
+            </div>
+            
+            <div style={styles.statRow}>
+              <span style={styles.statLabel}>MP</span>
+              <div style={styles.barBg}>
+                <div style={{ ...styles.barFill, width: `${mpPercent}%`, background: "#818cf8" }} />
+              </div>
+              <span style={styles.statVal}>{state.mp}/{state.maxMp}</span>
+            </div>
+
+            <div style={styles.goldRow}>
+              <span>💰 {state.gold} G</span>
+            </div>
+
+            <div style={styles.itemsSection}>
+              <div style={styles.itemsTitle}>🎒 アイテム</div>
+              {state.items.length === 0
+                ? <div style={styles.noItems}>なし</div>
+                : state.items.map((item, i) => (
+                    <div key={i} style={styles.itemTag}>{item}</div>
+                  ))
+              }
+            </div>
+          </div>
+
+          <button style={styles.resetBtn} onClick={resetGame}>🔄 最初から</button>
+        </div>
+
+        {/* メインエリア */}
+        <div style={styles.main}>
+          <div style={styles.situationBar}>
+            📍 {state.situation}
+          </div>
+
+          {/* ログ */}
+          <div style={styles.logArea} ref={logRef}>
+            {state.log.map((entry, i) => (
+              <div key={i} style={styles.logEntry}>
+                <p style={styles.logNarrative}>{entry.narrative}</p>
+                <div style={styles.logTags}>
+                  {entry.hpChange !== 0 && (
+                    <span style={{ ...styles.tag, color: entry.hpChange > 0 ? "#4ade80" : "#f87171" }}>
+                      HP {entry.hpChange > 0 ? "+" : ""}{entry.hpChange}
+                    </span>
+                  )}
+                  {entry.mpChange !== 0 && (
+                    <span style={{ ...styles.tag, color: "#818cf8" }}>
+                      MP {entry.mpChange > 0 ? "+" : ""}{entry.mpChange}
+                    </span>
+                  )}
+                  {entry.goldChange !== 0 && (
+                    <span style={{ ...styles.tag, color: "#facc15" }}>
+                      💰 {entry.goldChange > 0 ? "+" : ""}{entry.goldChange}G
+                    </span>
+                  )}
+                  {entry.itemGained && (
+                    <span style={{ ...styles.tag, color: "#fb923c" }}>✨ {entry.itemGained} 入手！</span>
+                  )}
+                  {entry.battleResult === "victory" && (
+                    <span style={{ ...styles.tag, color: "#fbbf24" }}>⚔️ 勝利！</span>
+                  )}
+                  {entry.battleResult === "defeat" && (
+                    <span style={{ ...styles.tag, color: "#f87171" }}>💀 敗北</span>
+                  )}
+                </div>
+              </div>
+            ))}
+            {state.loading && (
+              <div style={styles.loadingDots}>
+                <span style={styles.dot1}>●</span>
+                <span style={styles.dot2}>●</span>
+                <span style={styles.dot3}>●</span>
+              </div>
+            )}
+          </div>
+
+          {/* 選択肢 or Game Over */}
+          {state.gameOver ? (
+            <div style={styles.gameOverBox}>
+              <div style={styles.gameOverTitle}>💀 GAME OVER</div>
+              <p style={styles.gameOverText}>{state.playerName}の冒険はここで終わった…</p>
+              <button style={styles.retryBtn} onClick={resetGame}>もう一度挑戦する</button>
+            </div>
+          ) : (
+            <div style={styles.choicesArea}>
+              {state.choices.map((choice, i) => (
+                <button
+                  key={i}
+                  style={{ ...styles.choiceBtn, ...(state.loading ? styles.choiceBtnDisabled : {}) }}
+                  onClick={() => makeChoice(choice)}
+                  disabled={state.loading}
+                >
+                  <span style={styles.choiceNum}>{i + 1}</span>
+                  {choice}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@400;600;700&family=Cinzel:wght@700&display=swap');
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        .d1{animation:pulse 1s ease-in-out 0s infinite}
+        .d2{animation:pulse 1s ease-in-out 0.2s infinite}
+        .d3{animation:pulse 1s ease-in-out 0.4s infinite}
+      `}</style>
+    </div>
+  );
+}
+
+const styles = {
+  root: {
+    minHeight: "100vh",
+    background: "linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%)",
+    fontFamily: "'Noto Serif JP', serif",
+    color: "#e2d9c8",
+    padding: "16px",
+    boxSizing: "border-box",
+  },
+  titleScreen: {
+    display: "flex", flexDirection: "column", alignItems: "center",
+    justifyContent: "center", minHeight: "90vh", gap: "16px",
+  },
+  titleGlow: { fontSize: "64px", filter: "drop-shadow(0 0 20px #f59e0b)" },
+  title: {
+    fontFamily: "'Cinzel', serif", fontSize: "clamp(28px,6vw,52px)",
+    margin: 0, color: "#f59e0b",
+    textShadow: "0 0 30px #f59e0b88, 0 2px 4px #00000088",
+    letterSpacing: "0.1em",
+  },
+  subtitle: { color: "#a89880", margin: 0, fontSize: "14px", letterSpacing: "0.2em" },
+  setupCard: {
+    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(245,158,11,0.3)",
+    borderRadius: "16px", padding: "32px", width: "100%", maxWidth: "400px",
+    display: "flex", flexDirection: "column", gap: "12px",
+    backdropFilter: "blur(10px)",
+  },
+  label: { color: "#a89880", fontSize: "13px", letterSpacing: "0.1em" },
+  input: {
+    background: "rgba(255,255,255,0.08)", border: "1px solid rgba(245,158,11,0.4)",
+    borderRadius: "8px", padding: "12px 16px", color: "#e2d9c8",
+    fontSize: "16px", outline: "none", fontFamily: "'Noto Serif JP', serif",
+  },
+  classGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" },
+  classBtn: {
+    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.15)",
+    borderRadius: "8px", padding: "10px", color: "#c4b89a", cursor: "pointer",
+    fontSize: "13px", transition: "all 0.2s",
+  },
+  classBtnActive: {
+    background: "rgba(245,158,11,0.2)", border: "1px solid #f59e0b", color: "#f59e0b",
+  },
+  startBtn: {
+    background: "linear-gradient(135deg, #d97706, #f59e0b)", border: "none",
+    borderRadius: "10px", padding: "14px", color: "#1a1208",
+    fontSize: "16px", fontWeight: "700", cursor: "pointer",
+    fontFamily: "'Noto Serif JP', serif", letterSpacing: "0.1em",
+    marginTop: "8px",
+  },
+  startBtnDisabled: { opacity: 0.4, cursor: "not-allowed" },
+
+  // Game layout
+  gameLayout: { display: "flex", gap: "16px", maxWidth: "1000px", margin: "0 auto" },
+  sidebar: { width: "220px", flexShrink: 0, display: "flex", flexDirection: "column", gap: "12px" },
+  statusCard: {
+    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(245,158,11,0.25)",
+    borderRadius: "12px", padding: "16px", display: "flex", flexDirection: "column", gap: "12px",
+  },
+  playerHeader: { display: "flex", gap: "10px", alignItems: "center" },
+  playerAvatar: { fontSize: "32px" },
+  playerName: { fontWeight: "700", color: "#f59e0b", fontSize: "15px" },
+  playerClass: { color: "#9ca3af", fontSize: "12px" },
+  statRow: { display: "flex", alignItems: "center", gap: "6px" },
+  statLabel: { width: "24px", fontSize: "11px", color: "#9ca3af", flexShrink: 0 },
+  barBg: { flex: 1, height: "8px", background: "rgba(255,255,255,0.1)", borderRadius: "4px", overflow: "hidden" },
+  barFill: { height: "100%", borderRadius: "4px", transition: "width 0.5s ease" },
+  statVal: { fontSize: "11px", color: "#9ca3af", width: "50px", textAlign: "right" },
+  goldRow: { color: "#facc15", fontSize: "14px", fontWeight: "600", textAlign: "center" },
+  itemsSection: { display: "flex", flexDirection: "column", gap: "4px" },
+  itemsTitle: { fontSize: "12px", color: "#9ca3af" },
+  noItems: { fontSize: "12px", color: "#6b7280", fontStyle: "italic" },
+  itemTag: {
+    fontSize: "11px", background: "rgba(251,146,60,0.15)", border: "1px solid rgba(251,146,60,0.3)",
+    borderRadius: "4px", padding: "3px 8px", color: "#fb923c",
+  },
+  resetBtn: {
+    background: "transparent", border: "1px solid rgba(255,255,255,0.15)",
+    borderRadius: "8px", padding: "8px", color: "#6b7280", cursor: "pointer",
+    fontSize: "12px",
+  },
+
+  // Main
+  main: { flex: 1, display: "flex", flexDirection: "column", gap: "12px", minWidth: 0 },
+  situationBar: {
+    background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)",
+    borderRadius: "8px", padding: "8px 14px", fontSize: "13px", color: "#d97706",
+  },
+  logArea: {
+    flex: 1, minHeight: "300px", maxHeight: "420px", overflowY: "auto",
+    display: "flex", flexDirection: "column", gap: "12px",
+    padding: "4px 4px 4px 0",
+  },
+  logEntry: {
+    background: "rgba(255,255,255,0.04)", borderRadius: "10px", padding: "14px 16px",
+    border: "1px solid rgba(255,255,255,0.08)", animation: "none",
+  },
+  logNarrative: { margin: "0 0 8px 0", fontSize: "14px", lineHeight: "1.8", color: "#d1c4b0" },
+  logTags: { display: "flex", gap: "8px", flexWrap: "wrap" },
+  tag: { fontSize: "12px", fontWeight: "600" },
+  loadingDots: { display: "flex", gap: "6px", padding: "12px 16px", justifyContent: "center" },
+  dot1: { className: "d1", fontSize: "20px", color: "#f59e0b", animation: "pulse 1s 0s infinite" },
+  dot2: { fontSize: "20px", color: "#f59e0b" },
+  dot3: { fontSize: "20px", color: "#f59e0b" },
+
+  choicesArea: { display: "flex", flexDirection: "column", gap: "8px" },
+  choiceBtn: {
+    background: "rgba(255,255,255,0.05)", border: "1px solid rgba(245,158,11,0.35)",
+    borderRadius: "10px", padding: "12px 16px", color: "#e2d9c8",
+    cursor: "pointer", fontSize: "14px", textAlign: "left",
+    display: "flex", alignItems: "center", gap: "10px",
+    transition: "all 0.15s", fontFamily: "'Noto Serif JP', serif",
+  },
+  choiceBtnDisabled: { opacity: 0.4, cursor: "not-allowed" },
+  choiceNum: {
+    width: "24px", height: "24px", borderRadius: "50%",
+    background: "rgba(245,158,11,0.2)", border: "1px solid #f59e0b",
+    color: "#f59e0b", fontSize: "12px", display: "flex", alignItems: "center",
+    justifyContent: "center", flexShrink: 0, fontWeight: "700",
+  },
+
+  gameOverBox: {
+    background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.4)",
+    borderRadius: "12px", padding: "24px", textAlign: "center",
+  },
+  gameOverTitle: { fontSize: "28px", fontWeight: "700", color: "#f87171", marginBottom: "8px" },
+  gameOverText: { color: "#d1c4b0", marginBottom: "16px" },
+  retryBtn: {
+    background: "linear-gradient(135deg, #dc2626, #ef4444)", border: "none",
+    borderRadius: "8px", padding: "12px 24px", color: "white",
+    fontSize: "14px", cursor: "pointer", fontFamily: "'Noto Serif JP', serif",
+  },
+};
